@@ -5,8 +5,11 @@ import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'rec
 import './App.css';
 import { toast } from 'sonner';
 
-const API_URL = 'http://localhost:5001';
-const socket = io(API_URL);
+const rawApiUrl = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:5001' : window.location.origin);
+const API_URL = rawApiUrl.replace(/\/+$/, '');
+const socket = io(API_URL, {
+  transports: ['websocket', 'polling']
+});
 
 function App() {
   const [endpoints, setEndpoints] = useState([]);
