@@ -104,3 +104,4 @@ Express can serve the prebuilt React frontend directly from `client/dist`.
 3. Add Environment Variables:
    - `MONGO_URI`: Your MongoDB connection string
    - `PORT`: Managed by platform
+

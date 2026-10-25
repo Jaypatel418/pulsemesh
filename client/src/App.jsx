@@ -6,7 +6,7 @@ import './App.css';
 import { toast } from 'sonner';
 
 const rawApiUrl = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:5001' : window.location.origin);
-const API_URL = rawApiUrl.replace(/\/+$/, '');
+const API_URL = 'https://pulsemesh-x1fk.onrender.com';
 const socket = io(API_URL, {
   transports: ['websocket', 'polling']
 });
