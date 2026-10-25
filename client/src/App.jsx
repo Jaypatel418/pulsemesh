@@ -5,7 +5,6 @@ import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'rec
 import './App.css';
 import { toast } from 'sonner';
 
-const rawApiUrl = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:5001' : window.location.origin);
 const API_URL = 'https://pulsemesh-x1fk.onrender.com';
 const socket = io(API_URL, {
   transports: ['websocket', 'polling']
@@ -15,12 +14,24 @@ function App() {
   const [endpoints, setEndpoints] = useState([]);
   const [pings, setPings] = useState([]);
   const [incidents, setIncidents] = useState([]);
+  const [token, setToken] = useState(null);
+
+  const login = async () => {
+    const res = await axios.post(`${API_URL}/api/login`, {
+      username: 'admin',
+      password: 'pulsemesh123'
+    });
+    setToken(res.data.token);
+  };
 
   const triggerMode = async (mode) => {
-    await axios.post(`${API_URL}/api/synthetic-test/mode`, { mode });
+    await axios.post(`${API_URL}/api/synthetic-test/mode`, { mode }, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
   };
 
   useEffect(() => {
+    login();
     axios.get(`${API_URL}/api/endpoints`).then(res => setEndpoints(res.data));
 
     socket.on('ping-result', (data) => {
@@ -28,20 +39,20 @@ function App() {
     });
 
     socket.on('incident-opened', (data) => {
-  setIncidents(prev => [{ ...data, status: 'open' }, ...prev]);
-  toast.error(`🚨 Incident: ${data.endpointName} — ${data.reason}`);
-});
+      setIncidents(prev => [{ ...data, status: 'open' }, ...prev]);
+      toast.error(`🚨 Incident: ${data.endpointName} — ${data.reason}`);
+    });
 
-socket.on('incident-resolved', (data) => {
-  setIncidents(prev =>
-    prev.map(inc =>
-      inc.endpointId === data.endpointId && inc.status === 'open'
-        ? { ...inc, status: 'resolved', resolvedAt: data.resolvedAt }
-        : inc
-    )
-  );
-  toast.success(`✅ Resolved: ${data.endpointName} is back to normal`);
-});
+    socket.on('incident-resolved', (data) => {
+      setIncidents(prev =>
+        prev.map(inc =>
+          inc.endpointId === data.endpointId && inc.status === 'open'
+            ? { ...inc, status: 'resolved', resolvedAt: data.resolvedAt }
+            : inc
+        )
+      );
+      toast.success(`✅ Resolved: ${data.endpointName} is back to normal`);
+    });
 
     return () => {
       socket.off('ping-result');
