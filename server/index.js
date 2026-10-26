@@ -13,7 +13,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 
 const Endpoint = require('./models/Endpoint');
-const Admin = require('./models/admin');
+const admin = require('./models/admin');
 const { pingAllEndpoints, setIO } = require('./services/pingService');
 
 const app = express();
