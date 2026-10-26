@@ -13,8 +13,9 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 
 const Endpoint = require('./models/Endpoint');
-const admin = require('./models/admin');
+const Admin = require('./models/admin');
 const { pingAllEndpoints, setIO } = require('./services/pingService');
+const { sendAlert } = require('./services/mailer');
 
 const app = express();
 
@@ -52,6 +53,19 @@ function requireAuth(req, res, next) {
   }
 }
 
+app.get('/', (req, res) => {
+  res.send(`
+    <html>
+      <head><title>PulseMesh API</title></head>
+      <body style="font-family:sans-serif;text-align:center;margin-top:80px;">
+        <h1>PulseMesh API is running ✅</h1>
+        <p>Real-Time API Health Monitor & Synthetic Latency Telemetry Hub</p>
+        <p><a href="https://pulsemesh.vercel.app">Open the dashboard</a> · <a href="/api/health">Health check</a></p>
+      </body>
+    </html>
+  `);
+});
+
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' });
 });
@@ -59,18 +73,23 @@ app.get('/api/health', (req, res) => {
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
 
-  const admin = await Admin.findOne({ username });
-  if (!admin) {
+  const adminUser = await Admin.findOne({ username });
+  if (!adminUser) {
     return res.status(401).json({ error: 'Invalid credentials' });
   }
 
-  const match = await bcrypt.compare(password, admin.passwordHash);
+  const match = await bcrypt.compare(password, adminUser.passwordHash);
   if (!match) {
     return res.status(401).json({ error: 'Invalid credentials' });
   }
 
   const token = jwt.sign({ username }, process.env.JWT_SECRET, { expiresIn: '2h' });
   res.json({ token });
+});
+
+app.post('/api/test-email', requireAuth, async (req, res) => {
+  await sendAlert('PulseMesh test email', 'If you can read this, email alerts work.');
+  res.json({ message: 'Test email attempted, check Render logs for [MAIL]' });
 });
 
 app.get('/api/endpoints', async (req, res) => {
