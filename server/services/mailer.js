@@ -1,23 +1,26 @@
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: { user: process.env.MAIL_USER, pass: process.env.MAIL_PASS }
-});
+const resend = process.env.RESEND_API_KEY
+  ? new Resend(process.env.RESEND_API_KEY)
+  : null;
 
 async function sendAlert(subject, text) {
-  if (!process.env.MAIL_USER || !process.env.MAIL_PASS || !process.env.ALERT_EMAIL_TO) {
-    console.warn('[MAIL] Skipped: mail env vars not set');
+  if (!resend || !process.env.ALERT_EMAIL_TO) {
+    console.warn('[MAIL] Skipped: RESEND_API_KEY or ALERT_EMAIL_TO not set');
     return;
   }
   try {
-    await transporter.sendMail({
-      from: `"PulseMesh Alerts" <${process.env.MAIL_USER}>`,
+    const { error } = await resend.emails.send({
+      from: 'PulseMesh Alerts <onboarding@resend.dev>',
       to: process.env.ALERT_EMAIL_TO,
       subject,
       text
     });
-    console.log(`[MAIL] Sent: ${subject}`);
+    if (error) {
+      console.error('[MAIL] Failed:', error.message);
+    } else {
+      console.log(`[MAIL] Sent: ${subject}`);
+    }
   } catch (err) {
     console.error('[MAIL] Failed:', err.message);
   }
