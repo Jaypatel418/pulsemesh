@@ -13,176 +13,145 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 
 const Endpoint = require('./models/Endpoint');
-const Admin = require('./models/admin');
+const User = require('./models/user');
+const PingResult = require('./models/PingResult');
+const Incident = require('./models/Incident');
 const { pingAllEndpoints, setIO } = require('./services/pingService');
-const { sendAlert } = require('./services/mailer');
+
+const PORT = process.env.PORT || 5001;
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) { console.error('JWT_SECRET missing'); process.exit(1); }
+const clientOrigin = process.env.CLIENT_URL
+  ? process.env.CLIENT_URL.split(',').map((s) => s.trim()) : '*';
 
 const app = express();
-
-const clientOrigin = process.env.CLIENT_URL
-  ? (process.env.CLIENT_URL.includes(',')
-      ? process.env.CLIENT_URL.split(',').map(s => s.trim())
-      : process.env.CLIENT_URL.trim())
-  : '*';
-
 app.use(cors({ origin: clientOrigin }));
 app.use(helmet());
 app.use(express.json());
 
-let syntheticMode = 'normal';
-
+const authSchema = Joi.object({
+  email: Joi.string().email().max(120).required(),
+  password: Joi.string().min(8).max(72).required(),
+});
 const endpointSchema = Joi.object({
   name: Joi.string().min(1).max(100).required(),
-  url: Joi.string().uri().required(),
-  intervalSeconds: Joi.number().integer().min(5).max(3600).default(30),
-  latencyThresholdMs: Joi.number().integer().min(100).max(60000).default(1000)
+  url: Joi.string().uri({ scheme: ['http', 'https'] }).required(),
+  intervalSeconds: Joi.number().min(5).max(3600).default(30),
+  latencyThresholdMs: Joi.number().min(100).max(60000).default(1000),
 });
+
+const sign = (u) => jwt.sign({ id: String(u._id), email: u.email }, JWT_SECRET, { expiresIn: '2h' });
 
 function requireAuth(req, res, next) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'No token provided' });
-  }
-
-  const token = authHeader.split(' ')[1];
+  const h = req.headers.authorization || '';
   try {
-    jwt.verify(token, process.env.JWT_SECRET);
+    req.user = jwt.verify(h.replace('Bearer ', ''), JWT_SECRET);
     next();
-  } catch (err) {
-    return res.status(401).json({ error: 'Invalid or expired token' });
-  }
+  } catch { res.status(401).json({ error: 'Unauthorized' }); }
 }
 
-app.get('/', (req, res) => {
-  res.send(`
-    <html>
-      <head><title>PulseMesh API</title></head>
-      <body style="font-family:sans-serif;text-align:center;margin-top:80px;">
-        <h1>PulseMesh API is running ✅</h1>
-        <p>Real-Time API Health Monitor & Synthetic Latency Telemetry Hub</p>
-        <p><a href="https://pulsemesh.vercel.app">Open the dashboard</a> · <a href="/api/health">Health check</a></p>
-      </body>
-    </html>
-  `);
-});
+app.get('/', (req, res) => res.send('<h2>PulseMesh API is running</h2>'));
+app.get('/api/health', (req, res) =>
+  res.json({ status: 'ok', db: mongoose.connection.readyState === 1 }));
 
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok' });
+// ---------- Auth ----------
+app.post('/api/register', async (req, res) => {
+  const { error, value } = authSchema.validate(req.body);
+  if (error) return res.status(400).json({ error: error.details[0].message });
+  if (await User.findOne({ email: value.email.toLowerCase() }))
+    return res.status(409).json({ error: 'Email already registered' });
+  const user = await User.create({
+    email: value.email, passwordHash: await bcrypt.hash(value.password, 10),
+  });
+  res.status(201).json({ token: sign(user), email: user.email });
 });
 
 app.post('/api/login', async (req, res) => {
-  const { username, password } = req.body;
-
-  const adminUser = await Admin.findOne({ username });
-  if (!adminUser) {
-    return res.status(401).json({ error: 'Invalid credentials' });
-  }
-
-  const match = await bcrypt.compare(password, adminUser.passwordHash);
-  if (!match) {
-    return res.status(401).json({ error: 'Invalid credentials' });
-  }
-
-  const token = jwt.sign({ username }, process.env.JWT_SECRET, { expiresIn: '2h' });
-  res.json({ token });
+  const { error, value } = authSchema.validate(req.body);
+  if (error) return res.status(400).json({ error: error.details[0].message });
+  const user = await User.findOne({ email: value.email.toLowerCase() });
+  if (!user || !(await bcrypt.compare(value.password, user.passwordHash)))
+    return res.status(401).json({ error: 'Invalid email or password' });
+  res.json({ token: sign(user), email: user.email });
 });
 
-app.post('/api/test-email', requireAuth, async (req, res) => {
-  await sendAlert('PulseMesh test email', 'If you can read this, email alerts work.');
-  res.json({ message: 'Test email attempted, check Render logs for [MAIL]' });
-});
-
-app.get('/api/endpoints', async (req, res) => {
-  try {
-    const endpoints = await Endpoint.find();
-    res.json(endpoints);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+// ---------- Endpoints (per user) ----------
+app.get('/api/endpoints', requireAuth, async (req, res) => {
+  res.json(await Endpoint.find({ owner: req.user.id }).sort({ createdAt: -1 }));
 });
 
 app.post('/api/endpoints', requireAuth, async (req, res) => {
   const { error, value } = endpointSchema.validate(req.body);
-  if (error) {
-    return res.status(400).json({ error: error.details[0].message });
-  }
-
-  try {
-    const endpoint = await Endpoint.create(value);
-    res.json(endpoint);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  if (error) return res.status(400).json({ error: error.details[0].message });
+  if (await Endpoint.countDocuments({ owner: req.user.id }) >= 10)
+    return res.status(400).json({ error: 'Limit of 10 websites per user' });
+  res.status(201).json(await Endpoint.create({ ...value, owner: req.user.id }));
 });
 
 app.delete('/api/endpoints/:id', requireAuth, async (req, res) => {
   try {
-    await Endpoint.findByIdAndDelete(req.params.id);
-    res.json({ message: 'Deleted' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    const ep = await Endpoint.findOneAndDelete({ _id: req.params.id, owner: req.user.id });
+    if (!ep) return res.status(404).json({ error: 'Not found' });
+    await PingResult.deleteMany({ endpoint: ep._id });
+    await Incident.deleteMany({ endpoint: ep._id });
+    res.json({ ok: true });
+  } catch { res.status(400).json({ error: 'Bad id' }); }
 });
 
+// ---------- History ----------
+async function nameMap(userId) {
+  const eps = await Endpoint.find({ owner: userId }).select('name');
+  return { ids: eps.map((e) => e._id), names: Object.fromEntries(eps.map((e) => [String(e._id), e.name])) };
+}
+app.get('/api/pings', requireAuth, async (req, res) => {
+  const { ids, names } = await nameMap(req.user.id);
+  const rows = await PingResult.find({ endpoint: { $in: ids } }).sort({ timestamp: -1 }).limit(100).lean();
+  res.json(rows.map((r) => ({
+    _id: r._id, endpointId: String(r.endpoint), endpointName: names[String(r.endpoint)] || 'Unknown',
+    status: r.status, latencyMs: r.latencyMs, timestamp: r.timestamp,
+  })));
+});
+app.get('/api/incidents', requireAuth, async (req, res) => {
+  const { ids, names } = await nameMap(req.user.id);
+  const rows = await Incident.find({ endpoint: { $in: ids } }).sort({ startedAt: -1 }).limit(50).lean();
+  res.json(rows.map((r) => ({
+    _id: r._id, endpointId: String(r.endpoint), endpointName: names[String(r.endpoint)] || 'Unknown',
+    reason: r.reason, startedAt: r.startedAt, resolvedAt: r.resolvedAt,
+  })));
+});
+
+// ---------- Synthetic test target (for live demo) ----------
+let syntheticMode = 'normal';
 app.get('/api/synthetic-test', async (req, res) => {
-  if (syntheticMode === 'down') {
-    return res.status(500).json({ error: 'Simulated failure' });
-  }
-  if (syntheticMode === 'slow') {
-    await new Promise(resolve => setTimeout(resolve, 3000));
-  }
-  res.json({ status: 'ok', mode: syntheticMode });
+  if (syntheticMode === 'down') return res.status(503).json({ mode: 'down' });
+  if (syntheticMode === 'slow') await new Promise((r) => setTimeout(r, 3000));
+  res.json({ ok: true, mode: syntheticMode });
 });
-
 app.post('/api/synthetic-test/mode', requireAuth, (req, res) => {
   const { mode } = req.body;
-  if (!['normal', 'slow', 'down'].includes(mode)) {
-    return res.status(400).json({ error: 'Invalid mode' });
-  }
+  if (!['normal', 'slow', 'down'].includes(mode)) return res.status(400).json({ error: 'Invalid mode' });
   syntheticMode = mode;
-  res.json({ message: `Mode set to ${mode}` });
+  res.json({ mode });
 });
 
-const clientDistPath = path.join(__dirname, '../client/dist');
-if (fs.existsSync(clientDistPath)) {
-  app.use(express.static(clientDistPath));
-  app.use((req, res, next) => {
-    if (req.method === 'GET' && !req.path.startsWith('/api') && !req.path.startsWith('/socket.io')) {
-      return res.sendFile(path.join(clientDistPath, 'index.html'));
-    }
-    next();
-  });
-}
+const dist = path.join(__dirname, '../client/dist');
+if (fs.existsSync(dist)) app.use(express.static(dist));
 
-if (!process.env.MONGO_URI) {
-  console.warn('⚠️ WARNING: MONGO_URI is not set in environment variables.');
-}
-
-mongoose.connect(process.env.MONGO_URI || '')
-  .then(() => console.log('MongoDB connected'))
-  .catch(err => console.error('MongoDB connection error:', err));
-
+// ---------- Server + Socket.IO ----------
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: clientOrigin,
-    methods: ['GET', 'POST']
-  }
+const io = new Server(server, { cors: { origin: clientOrigin } });
+io.use((socket, next) => {
+  try {
+    const p = jwt.verify(socket.handshake.auth.token, JWT_SECRET);
+    socket.join('user:' + p.id);
+    next();
+  } catch { next(new Error('unauthorized')); }
 });
-
 setIO(io);
 
-io.on('connection', (socket) => {
-  console.log('Dashboard connected:', socket.id);
-  socket.on('disconnect', () => {
-    console.log('Dashboard disconnected:', socket.id);
-  });
-});
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => console.log('MongoDB connected'))
+  .catch((e) => console.error('Mongo error', e.message));
 
-cron.schedule('*/30 * * * * *', () => {
-  console.log('Running scheduled pings...');
-  pingAllEndpoints();
-});
-
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+cron.schedule('*/30 * * * * *', () => pingAllEndpoints());
+server.listen(PORT, () => console.log(`Server on ${PORT}`));
